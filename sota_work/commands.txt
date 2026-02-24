@@ -1,0 +1,2 @@
+tmux ls
+tmux attach -t 0
