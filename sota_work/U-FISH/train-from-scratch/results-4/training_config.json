@@ -1,0 +1,31 @@
+{
+  "val_fold": 4,
+  "train_folds": [
+    1,
+    2,
+    3,
+    5
+  ],
+  "n_folds": 5,
+  "fold_root": "/home/sukrit/saaransh/fish_project_sota_work/Model_B/Gene-Dataset-5Fold-Merged",
+  "epochs": 50,
+  "batch_size": 4,
+  "img_size": 512,
+  "num_workers": 0,
+  "lr": 0.001,
+  "optimizer": "Adam (no weight decay, no scheduler)",
+  "loss": "DiceRMSELoss = 0.6*Dice + 0.4*RMSE",
+  "weight_init": "Random Kaiming-He (from scratch)",
+  "n_train_images": 3417,
+  "n_val_images": 856,
+  "n_params": 162959,
+  "fixed_sigma_by_class": {
+    "0": 9.090620182964468,
+    "1": 9.332883428698292,
+    "2": 10.369467911433814
+  },
+  "device": "cuda",
+  "started_at": "2026-02-23T15:11:42.565113",
+  "augmentation": "horizontal + vertical flip",
+  "intensity_threshold": 0.5
+}

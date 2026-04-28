@@ -1,0 +1,221 @@
+
+The Problem & The Solution
+Your spots are ~10px blobs. U-FISH was designed for ~1-3px diffraction-limited spots.
+
+The official U-FISH pipeline:
+
+Target encoding: Binary point mask → gaussian_filter(mask, sigma=1) → peak-normalize to 1.0
+Input scaling: scale_image() → [0, 255] float32, NOT [0, 1]
+Loss: 0.6 × Dice + 0.4 × RMSE
+Post-processing: The reason you get "many spots per blob" is that local_maxima finds every local peak. With proper σ=1 targets, the model learns to output tight peaks → one local maximum per spot.
+Your YOLO bounding boxes → point annotations: Take the center (xc, yc) of each box. That's your spot coordinate. U-FISH does NOT use box dimensions for training — it only uses points.
+
+Why one detection per blob after finetuning with σ=1: The model learns to output a sharp spike at each spot center. Even though your input blob is 10px wide, the learned output is a 1-2px peak. local_maxima then finds exactly one peak per spot.
+
+Here is the complete, corrected finetuning script:
+
+Now create the inference notebook that matches this training:
+
+Why This Fixes "Many Spots Per Blob"
+Here's the mechanism:
+
+With σ=1 targets, you're telling the model: "I don't care how big the blob is in the input image — output a single tight spike at its center." The U-Net learns to compress the 10px input blob into a 3px output peak. Then local_maxima trivially finds one maximum per peak.
+
+You no longer need cc_size_threshold=500, Gaussian blur on heatmap, morphological closing, or NMS. Those were band-aids for the wrong σ. With σ=1, the default local_maxima post-processing works out of the box.
+
+Run training:
+
+
+OFFICIAL FINAL VERDICT: U-FISH Finetuning Pipeline
+Reference Paper
+U-FISH — Xu et al., Genome Biology (2025). Model architecture: UFishNet (U-Net + CBAM attention), 162,959 parameters.
+
+DAPI SUBTRACTION: YES, IT IS ENABLED
+SUBTRACT_DAPI = True in ALL 5 fold scripts (fold-1.py:55, fold-2.py:55, fold-3.py:55, fold-4.py:55, fold-5.py:55).
+
+What this means:
+
+For ORANGE (Red channel) and FITC (Green channel) probes: the Blue (DAPI) channel is subtracted from the probe signal before feeding to the model. This removes DAPI bleed-through that contaminates the probe channel in RGB composite images.
+For AQUA (Blue channel) probes: DAPI subtraction is skipped (since AQUA IS the blue channel, subtracting DAPI would destroy the signal).
+Is this in the official U-FISH paper? No. The official U-FISH code does NOT do DAPI subtraction — it expects clean single-channel microscopy images. DAPI subtraction is an adaptation we added because your dataset consists of RGB composite images where channels bleed into each other, not clean single-channel acquisitions. This is defensible for a MICCAI paper as a domain-specific preprocessing step, and you should describe it explicitly in your methods section.
+
+STRICT U-FISH PARAMETERS (What Matches the Paper Exactly)
+Parameter	Value in Scripts	Official U-FISH	Match?
+Target sigma (σ)	1.0	1.0	YES
+Input scaling	scale_image() → [0, 255] float32	scale_image() → [0, 255]	YES
+Target generation	Binary mask → gaussian_filter(σ=1) → peak-normalize	Identical	YES
+Loss function	DiceRMSELoss = 0.6 × Dice + 0.4 × RMSE	Identical	YES
+Optimizer	Adam, lr=1e-4	Adam (paper default)	YES
+Architecture	UFishNet (pretrained v1.0-alldata-ufish_c32.pth)	Same	YES
+Input shape	(B, 1, 512, 512) single-channel	(B, 1, H, W) single-channel	YES
+Output shape	(B, 1, 512, 512) density map	(B, 1, H, W) density map	YES
+DAPI subtraction	Enabled (True)	NOT in paper	ADAPTATION
+COMPLETE PIPELINE (Step-by-Step, Function-by-Function)
+Step 1: Sample Discovery — discover_samples()
+Scans each fold directory (fold-1/ through fold-5/) for image+label pairs. Looks in images/ for .jpg/.png files and in labels/ for matching .txt YOLO annotations. Skips images without labels.
+
+Dataset: Gene-Dataset-5Fold-Merged, 4,273 total images (512×512 RGB)
+Probes: ~420 ORANGE, ~400 FITC, ~32 AQUA per fold
+Fold sizes: fold-1: 868, fold-2: 855, fold-3: 853, fold-4: 856, fold-5: 841
+Step 2: YOLO → Point Coordinates — parse_yolo_to_points()
+Reads YOLO format labels (class xc yc w h, normalized 0-1) and extracts ONLY the center coordinates (xc, yc), converting them to pixel coordinates in (row, col) format. The bounding box width/height are completely discarded for training — U-FISH is a point detection model, not a box detection model.
+
+Step 3: Target Density Map — make_density_map_official()
+This is the core function that generates the ground truth the model learns to predict. It replicates the exact method from the official U-FISH source code (ufish/data.py):
+
+Create a binary point mask: zeros everywhere, 1.0 at each spot center coordinate
+Apply scipy.ndimage.gaussian_filter(mask, sigma=1.0) — each point becomes a tiny ~3px-wide Gaussian blob
+Peak-normalize: read the filtered value at each spot center, divide the entire density map by the minimum peak value → ensures every spot peak reaches ≈ 1.0
+Why σ=1 matters: With σ=1, each spot becomes a tight ~3px peak. The U-FISH local_maxima post-processing can cleanly find exactly one peak per spot. Your previous approach used σ=3-8 (calculated from YOLO box sizes), which created 15-25px blobs that the post-processing fragmented into multiple false detections per spot.
+
+Step 4: Input Preprocessing — load_and_preprocess()
+This is where your RGB images are converted to single-channel inputs:
+
+Load RGB image as uint8 → convert to float32 [0, 1]
+Detect probe type from filename (get_probe_channel()): ORANGE→Red(0), FITC→Green(1), AQUA→Blue(2)
+Extract probe channel — take only the relevant RGB channel
+DAPI subtraction (if SUBTRACT_DAPI=True AND probe is NOT AQUA): subtract the Blue channel from the probe channel, clip to [0, 1]. This removes DAPI nuclear staining bleed-through that would otherwise confuse the model
+Scale to [0, 255] and apply scale_image() from ufish.utils.img — this does 99.99th percentile outlier clipping + skimage.exposure.rescale_intensity to map the data to float32 [0, 255]. This is the exact function the pretrained U-FISH model was trained with
+Final input tensor: shape (1, 512, 512), dtype float32, range [0, 255]
+
+Step 5: Data Augmentation — inside FISHDataset.__getitem__()
+Applied only during training (not validation):
+
+Random horizontal flip (50% probability)
+Random vertical flip (50% probability)
+Random 90° rotation (0°, 90°, 180°, or 270°)
+Both input and target are augmented identically to maintain spatial alignment.
+
+Step 6: Loss Function — DiceRMSELoss
+Exactly replicates ufish.model.loss:
+
+DiceLoss: 
+1
+−
+2
+∑
+(
+p
+r
+e
+d
+⋅
+t
+a
+r
+g
+e
+t
+)
++
+ϵ
+∑
+(
+p
+r
+e
+d
+2
+)
++
+∑
+(
+t
+a
+r
+g
+e
+t
+2
+)
++
+ϵ
+1− 
+∑(pred 
+2
+ )+∑(target 
+2
+ )+ϵ
+2∑(pred⋅target)+ϵ
+​
+ , with 
+ϵ
+=
+10
+−
+5
+ϵ=10 
+−5
+ 
+RMSELoss: 
+MSE
+(
+p
+r
+e
+d
+,
+t
+a
+r
+g
+e
+t
+)
+MSE(pred,target)
+​
+ 
+Combined: 
+L
+=
+0.6
+×
+Dice
++
+0.4
+×
+RMSE
+L=0.6×Dice+0.4×RMSE
+Step 7: Model Loading — inside train()
+Instantiates UFish() from the official ufish package
+Loads pretrained weights: v1.0-alldata-ufish_c32.pth (from ~/.ufish/)
+Moves model to GPU
+All 162,959 parameters are unfrozen for finetuning
+Step 8: Training Loop — train()
+Optimizer: Adam with lr=1e-4
+Epochs: 50
+Batch size: 4
+Each epoch: full pass through training set + full pass through validation set
+Checkpointing: saves epoch_XXX.pth after every epoch AND best_model.pth whenever validation loss improves
+Metrics: saves metrics.json after every epoch with train loss, val loss, Dice, RMSE breakdown
+Tracks training time per epoch and total
+Step 9: 5-Fold Cross-Validation
+Each script validates on one fold and trains on the other four:
+
+Script	Validation Fold	Training Folds	Val Size	Train Size
+fold-1.py	fold-1	2,3,4,5	868	3,405
+fold-2.py	fold-2	1,3,4,5	855	3,418
+fold-3.py	fold-3	1,2,4,5	853	3,420
+fold-4.py	fold-4	1,2,3,5	856	3,417
+fold-5.py	fold-5	1,2,3,4	841	3,432
+Results saved to results-1/ through results-5/.
+
+WHAT IS OFFICIAL U-FISH vs. WHAT IS OUR ADAPTATION
+Strictly Official U-FISH (6 things):
+
+σ = 1.0 for target Gaussian
+scale_image() to [0, 255] float32
+Binary mask → gaussian_filter → peak-normalize
+DiceRMSELoss (0.6/0.4 split)
+UFishNet architecture with pretrained weights
+Single-channel input, single-channel output
+Our Adaptations (2 things, NOT in the paper):
+
+DAPI subtraction — needed because your images are RGB composites, not clean single-channel acquisitions. The official U-FISH training data came from clean microscopy channels where DAPI was already separated
+YOLO box center extraction — the paper uses point annotations directly. We convert YOLO bounding box annotations to point annotations by taking only the center coordinate and discarding width/height
+BOTTOM LINE
+The scripts use DAPI subtraction = True. This is ON and active. It is NOT part of the official U-FISH method but is a necessary adaptation for your RGB composite dataset. Everything else — σ=1 target, scale_image [0,255], DiceRMSE loss, peak normalization, UFishNet architecture — is exactly the official U-FISH method.
+
+If you want to run 100% pure U-FISH without any adaptation, change SUBTRACT_DAPI = False on line 55 of each fold script. But I would recommend keeping it True because your RGB images have genuine DAPI bleed-through in the Red and Green channels that would degrade detection performance.
+
+Claude Opus 4.6 • 3x
