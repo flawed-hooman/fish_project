@@ -1,0 +1,11 @@
+names:
+- '0'
+- '1'
+- '2'
+nc: 3
+train:
+- /home/cvpr_ug_4/saaransh/FULL_DATASET/gene_dataset_5folds/fold_1/images
+- /home/cvpr_ug_4/saaransh/FULL_DATASET/gene_dataset_5folds/fold_2/images
+- /home/cvpr_ug_4/saaransh/FULL_DATASET/gene_dataset_5folds/fold_4/images
+- /home/cvpr_ug_4/saaransh/FULL_DATASET/gene_dataset_5folds/fold_5/images
+val: /home/cvpr_ug_4/saaransh/FULL_DATASET/gene_dataset_5folds/fold_3/images
